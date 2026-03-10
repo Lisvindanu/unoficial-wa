@@ -15,6 +15,7 @@ import { createSocket } from './sessions/socketFactory'
 import sessionsRouter from './routes/sessions'
 import messagesRouter from './routes/messages'
 import dashboardRouter from './routes/dashboard'
+import wahaRouter from './routes/waha'
 
 const app = express()
 
@@ -34,6 +35,9 @@ app.use(express.static(path.join(process.cwd(), 'public')))
 app.use('/api/sessions', sessionsRouter)
 app.use('/api/messages', messagesRouter)
 app.use('/dashboard', dashboardRouter)
+// WAHA-compat flat routes: /api/:name/auth/* and /api/sendText|Image|File
+// Must be mounted AFTER /api/sessions and /api/messages to avoid shadowing
+app.use('/api', wahaRouter)
 
 // Swagger docs
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec))

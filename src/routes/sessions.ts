@@ -2,225 +2,165 @@ import { Router, Request, Response } from 'express'
 import { apiKeyAuth } from '../middleware/apiKeyAuth'
 import { ipWhitelist } from '../middleware/ipWhitelist'
 import { SessionManager, mapStatus, buildMe } from '../sessions/sessionManager'
-import { usePostgresAuthState } from '../sessions/authAdapter'
-import { createSocket } from '../sessions/socketFactory'
+import { startSession, stopSession, restartSession, logoutSession, canStart } from '../sessions/sessionService'
 import { prisma } from '../lib/prisma'
 import { logger } from '../lib/logger'
 import { config } from '../config/env'
 
 const router = Router()
 
-/**
- * @swagger
- * /api/sessions/start:
- *   post:
- *     summary: Inisialisasi sesi WhatsApp baru
- *     tags: [Sessions]
- *     security:
- *       - ApiKeyAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [sessionId]
- *             properties:
- *               sessionId:
- *                 type: string
- *                 example: "tx-customer-001"
- *     responses:
- *       200:
- *         description: Sesi berhasil dimulai, tunggu QR via SSE atau webhook
- *       409:
- *         description: Sesi sudah aktif
- *       429:
- *         description: Melebihi batas maksimum sesi
- */
-router.post('/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
-  const { sessionId: rawSessionId, name: rawName, webhookUrl, webhookSecret } = req.body
-  // Accept either sessionId or name (WAHA compat)
-  const sessionId: string = rawSessionId ?? rawName
-  const sessionName: string | undefined = rawName ?? rawSessionId
+function sessionResponse(sessionId: string) {
+  const s = SessionManager.get(sessionId)!
+  const status = mapStatus(s)
+  return { name: s.name ?? sessionId, status, me: buildMe(s), engine: { engine: 'NOWEB', state: status } }
+}
 
+// ── GET /api/sessions ─────────────────────────────────────────────
+router.get('/', apiKeyAuth, ipWhitelist, (_req: Request, res: Response) => {
+  res.json(SessionManager.getAll())
+})
+
+// ── GET /api/sessions/:name ───────────────────────────────────────
+router.get('/:name', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
+  if (!SessionManager.has(sessionId)) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+  res.json(sessionResponse(sessionId))
+})
+
+// ── POST /api/sessions — create + start (WAHA format) ────────────
+router.post('/', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const { name, start, config: sessionConfig } = req.body as {
+    name?: string
+    start?: boolean
+    config?: { webhookUrl?: string; webhookSecret?: string }
+  }
+
+  const sessionId = name
   if (!sessionId || typeof sessionId !== 'string') {
-    res.status(400).json({ error: 'sessionId (or name) is required' })
+    res.status(400).json({ error: 'name is required' })
     return
   }
 
   if (SessionManager.has(sessionId)) {
-    const session = SessionManager.get(sessionId)!
-    res.json({
-      name: session.name ?? sessionId,
-      status: mapStatus(session),
-      me: buildMe(session),
-      engine: { engine: 'NOWEB', state: mapStatus(session) }
-    })
+    res.json(sessionResponse(sessionId))
     return
   }
 
-  if (SessionManager.count() >= config.maxSessions) {
+  if (!canStart()) {
     res.status(429).json({ error: `Max sessions limit (${config.maxSessions}) reached` })
     return
   }
 
   try {
-    await prisma.session.upsert({
-      where: { id: sessionId },
-      update: { name: sessionName ?? null, status: 'pending', webhookUrl: webhookUrl ?? null, webhookSecret: webhookSecret ?? null },
-      create: { id: sessionId, name: sessionName ?? null, status: 'pending', webhookUrl: webhookUrl ?? null, webhookSecret: webhookSecret ?? null }
+    await startSession(sessionId, {
+      name,
+      webhookUrl: sessionConfig?.webhookUrl,
+      webhookSecret: sessionConfig?.webhookSecret
     })
+    res.status(201).json(sessionResponse(sessionId))
+  } catch (err) {
+    logger.error({ sessionId, err }, 'Failed to create session')
+    res.status(500).json({ error: 'Failed to create session' })
+  }
+})
 
-    const { state, saveCreds } = await usePostgresAuthState(sessionId)
-    const sock = await createSocket(sessionId, state, saveCreds)
+// ── POST /api/sessions/:name/start ───────────────────────────────
+router.post('/:name/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
 
-    SessionManager.set(sessionId, {
-      socket: sock,
-      status: 'pending',
-      name: sessionName,
-      webhookUrl: webhookUrl ?? undefined,
-      webhookSecret: webhookSecret ?? undefined
+  if (SessionManager.has(sessionId)) {
+    res.json(sessionResponse(sessionId))
+    return
+  }
+
+  if (!canStart()) {
+    res.status(429).json({ error: `Max sessions limit (${config.maxSessions}) reached` })
+    return
+  }
+
+  try {
+    const existing = await prisma.session.findUnique({ where: { id: sessionId } })
+    await startSession(sessionId, {
+      name: existing?.name ?? sessionId,
+      webhookUrl: existing?.webhookUrl ?? undefined,
+      webhookSecret: existing?.webhookSecret ?? undefined
     })
-
-    logger.info({ sessionId, webhookUrl }, 'Session starting')
-
-    res.json({
-      name: sessionName ?? sessionId,
-      status: 'STARTING',
-      me: null,
-      engine: { engine: 'NOWEB', state: 'STARTING' }
-    })
+    res.json(sessionResponse(sessionId))
   } catch (err) {
     logger.error({ sessionId, err }, 'Failed to start session')
     res.status(500).json({ error: 'Failed to start session' })
   }
 })
 
-/**
- * @swagger
- * /api/sessions/stop:
- *   post:
- *     summary: Hentikan sesi WhatsApp
- *     tags: [Sessions]
- *     security:
- *       - ApiKeyAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [sessionId]
- *             properties:
- *               sessionId:
- *                 type: string
- *     responses:
- *       200:
- *         description: Sesi berhasil dihentikan
- *       404:
- *         description: Sesi tidak ditemukan
- */
-router.post('/stop', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
-  const { sessionId } = req.body
-
-  if (!sessionId) {
-    res.status(400).json({ error: 'sessionId is required' })
-    return
-  }
+// ── POST /api/sessions/:name/stop ────────────────────────────────
+router.post('/:name/stop', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
 
   if (!SessionManager.has(sessionId)) {
     res.status(404).json({ error: 'Session not found' })
     return
   }
 
-  SessionManager.delete(sessionId)
-  await prisma.session.update({
-    where: { id: sessionId },
-    data: { status: 'disconnected' }
-  }).catch(() => { })
-
-  logger.info({ sessionId }, 'Session stopped')
-  res.json({ success: true, sessionId })
+  await stopSession(sessionId)
+  res.json({ name: sessionId, status: 'STOPPED' })
 })
 
-/**
- * @swagger
- * /api/sessions/{sessionId}/status:
- *   get:
- *     summary: Status sesi tertentu
- *     tags: [Sessions]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: sessionId
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Status sesi
- *       404:
- *         description: Sesi tidak ditemukan
- */
-router.get('/:sessionId/status', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
-  const sessionId = String(req.params.sessionId)
-  const session = SessionManager.get(sessionId)
+// ── POST /api/sessions/:name/restart ─────────────────────────────
+router.post('/:name/restart', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
 
-  if (!session) {
+  if (!SessionManager.has(sessionId)) {
     res.status(404).json({ error: 'Session not found' })
     return
   }
 
-  const status = mapStatus(session)
-  res.json({
-    name: session.name ?? sessionId,
-    status,
-    me: buildMe(session),
-    engine: { engine: 'NOWEB', state: status }
-  })
+  try {
+    await restartSession(sessionId)
+    res.json(sessionResponse(sessionId))
+  } catch (err) {
+    logger.error({ sessionId, err }, 'Failed to restart session')
+    res.status(500).json({ error: 'Failed to restart session' })
+  }
 })
 
-/**
- * @swagger
- * /api/sessions:
- *   get:
- *     summary: List semua sesi aktif
- *     tags: [Sessions]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: Array sesi
- */
-router.get('/', apiKeyAuth, ipWhitelist, (_req: Request, res: Response) => {
-  res.json(SessionManager.getAll())
+// ── POST /api/sessions/:name/logout ──────────────────────────────
+router.post('/:name/logout', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
+
+  if (!SessionManager.has(sessionId)) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+
+  try {
+    await logoutSession(sessionId)
+    res.json({ success: true })
+  } catch (err) {
+    logger.error({ sessionId, err }, 'Failed to logout session')
+    res.status(500).json({ error: 'Failed to logout session' })
+  }
 })
 
-/**
- * @swagger
- * /api/sessions/{sessionId}/me:
- *   get:
- *     summary: Info akun WhatsApp yang login pada sesi ini
- *     tags: [Sessions]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: sessionId
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Info akun
- *       404:
- *         description: Sesi tidak ditemukan
- *       409:
- *         description: Sesi belum connected
- */
-router.get('/:sessionId/me', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
-  const sessionId = String(req.params.sessionId)
+// ── DELETE /api/sessions/:name ────────────────────────────────────
+router.delete('/:name', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
+
+  if (!SessionManager.has(sessionId)) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+
+  await stopSession(sessionId)
+  await prisma.session.delete({ where: { id: sessionId } }).catch(() => { })
+  res.json({ success: true })
+})
+
+// ── GET /api/sessions/:name/me ────────────────────────────────────
+router.get('/:name/me', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
   const session = SessionManager.get(sessionId)
 
   if (!session) {
@@ -233,42 +173,12 @@ router.get('/:sessionId/me', apiKeyAuth, ipWhitelist, (req: Request, res: Respon
     return
   }
 
-  const me = buildMe(session)
-  res.json(me)
+  res.json(buildMe(session))
 })
 
-/**
- * @swagger
- * /api/sessions/{sessionId}/auth/qr:
- *   get:
- *     summary: Dapatkan QR code untuk pairing
- *     tags: [Sessions]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: sessionId
- *         required: true
- *         schema:
- *           type: string
- *       - in: query
- *         name: format
- *         schema:
- *           type: string
- *           enum: [image, raw]
- *           default: image
- *     responses:
- *       200:
- *         description: QR code (image/png atau raw string)
- *       202:
- *         description: Sesi pending, QR belum tersedia — coba lagi sebentar
- *       404:
- *         description: Sesi tidak ditemukan
- *       409:
- *         description: Sesi sudah connected, tidak perlu QR
- */
-router.get('/:sessionId/auth/qr', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
-  const sessionId = String(req.params.sessionId)
+// ── GET /api/sessions/:name/auth/qr ──────────────────────────────
+router.get('/:name/auth/qr', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
   const format = (req.query.format as string) || 'image'
   const session = SessionManager.get(sessionId)
 
@@ -292,48 +202,15 @@ router.get('/:sessionId/auth/qr', apiKeyAuth, ipWhitelist, (req: Request, res: R
     return
   }
 
-  // Default: image/png
   const base64Data = session.qr.replace(/^data:image\/png;base64,/, '')
   const imgBuffer = Buffer.from(base64Data, 'base64')
   res.setHeader('Content-Type', 'image/png')
   res.send(imgBuffer)
 })
 
-/**
- * @swagger
- * /api/sessions/{sessionId}/auth/request-code:
- *   post:
- *     summary: Minta kode pairing via nomor HP (tanpa scan QR)
- *     tags: [Sessions]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: sessionId
- *         required: true
- *         schema:
- *           type: string
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [phoneNumber]
- *             properties:
- *               phoneNumber:
- *                 type: string
- *                 example: "628123456789"
- *     responses:
- *       200:
- *         description: Kode pairing (masukkan di WA > Perangkat Tertaut > Tautkan dengan nomor telepon)
- *       404:
- *         description: Sesi tidak ditemukan
- *       409:
- *         description: Sesi sudah connected
- */
-router.post('/:sessionId/auth/request-code', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
-  const sessionId = String(req.params.sessionId)
+// ── POST /api/sessions/:name/auth/request-code ───────────────────
+router.post('/:name/auth/request-code', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
   const { phoneNumber } = req.body as { phoneNumber?: string }
 
   if (!phoneNumber) {
@@ -342,7 +219,6 @@ router.post('/:sessionId/auth/request-code', apiKeyAuth, ipWhitelist, async (req
   }
 
   const session = SessionManager.get(sessionId)
-
   if (!session) {
     res.status(404).json({ error: 'Session not found' })
     return
@@ -354,7 +230,6 @@ router.post('/:sessionId/auth/request-code', apiKeyAuth, ipWhitelist, async (req
   }
 
   try {
-    // Strip non-digits
     const phone = phoneNumber.replace(/\D/g, '')
     const code = await session.socket.requestPairingCode(phone)
     logger.info({ sessionId, phoneNumber: phone }, 'Pairing code requested')
@@ -363,6 +238,55 @@ router.post('/:sessionId/auth/request-code', apiKeyAuth, ipWhitelist, async (req
     logger.error({ sessionId, err }, 'Failed to request pairing code')
     res.status(500).json({ error: 'Failed to request pairing code' })
   }
+})
+
+// ── Backward-compat aliases ───────────────────────────────────────
+
+// POST /api/sessions/start (old format, body: {sessionId})
+router.post('/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const { sessionId, name, webhookUrl, webhookSecret } = req.body
+  const id: string = sessionId ?? name
+
+  if (!id || typeof id !== 'string') {
+    res.status(400).json({ error: 'sessionId (or name) is required' })
+    return
+  }
+
+  if (SessionManager.has(id)) {
+    res.json(sessionResponse(id))
+    return
+  }
+
+  if (!canStart()) {
+    res.status(429).json({ error: `Max sessions limit (${config.maxSessions}) reached` })
+    return
+  }
+
+  try {
+    await startSession(id, { name: name ?? id, webhookUrl, webhookSecret })
+    res.json(sessionResponse(id))
+  } catch (err) {
+    logger.error({ sessionId: id, err }, 'Failed to start session')
+    res.status(500).json({ error: 'Failed to start session' })
+  }
+})
+
+// POST /api/sessions/stop (old format, body: {sessionId})
+router.post('/stop', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const { sessionId } = req.body
+
+  if (!sessionId) {
+    res.status(400).json({ error: 'sessionId is required' })
+    return
+  }
+
+  if (!SessionManager.has(sessionId)) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+
+  await stopSession(sessionId)
+  res.json({ success: true, sessionId })
 })
 
 export default router

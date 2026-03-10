@@ -3,6 +3,7 @@ import crypto from 'crypto'
 import { config } from '../config/env'
 
 export function apiKeyAuth(req: Request, res: Response, next: NextFunction): void {
+  // Express lowercases all headers; both X-Api-Key and X-API-Key map to 'x-api-key'
   const key = req.headers['x-api-key']
   if (!key || !config.apiKey) {
     res.status(401).json({ error: 'Unauthorized' })

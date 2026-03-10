@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import { apiKeyAuth } from '../middleware/apiKeyAuth'
 import { ipWhitelist } from '../middleware/ipWhitelist'
 import { SessionManager } from '../sessions/sessionManager'
+import { normalizeChatId } from '../sessions/sessionService'
 import { logger } from '../lib/logger'
 
 const router = Router()
@@ -55,7 +56,7 @@ router.post('/send', apiKeyAuth, ipWhitelist, async (req: Request, res: Response
   }
 
   try {
-    const result = await session.socket.sendMessage(to, { text })
+    const result = await session.socket.sendMessage(normalizeChatId(to), { text })
     logger.info({ sessionId, to }, 'Message sent')
     res.json({ messageId: result?.key?.id, status: 'sent' })
   } catch (err) {
@@ -130,7 +131,7 @@ router.post('/send-media', apiKeyAuth, ipWhitelist, async (req: Request, res: Re
       return
     }
 
-    const result = await session.socket.sendMessage(to, content)
+    const result = await session.socket.sendMessage(normalizeChatId(to), content)
     logger.info({ sessionId, to, type }, 'Media sent')
     res.json({ messageId: result?.key?.id, status: 'sent' })
   } catch (err) {

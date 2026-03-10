@@ -2,8 +2,7 @@ import { Router, Request, Response } from 'express'
 import { SseEventBus } from '../sse/eventBus'
 import { SessionManager } from '../sessions/sessionManager'
 import { adminAuth, setAdminCookie, clearAdminCookie, isAdminAuthenticated } from '../middleware/adminAuth'
-import { usePostgresAuthState } from '../sessions/authAdapter'
-import { createSocket } from '../sessions/socketFactory'
+import { startSession, stopSession, restartSession, canStart } from '../sessions/sessionService'
 import { prisma } from '../lib/prisma'
 import { logger } from '../lib/logger'
 import { config } from '../config/env'
@@ -78,37 +77,19 @@ router.post('/api/sessions/start', adminAuth, async (req: Request, res: Response
 
   if (SessionManager.has(sessionId)) {
     const s = SessionManager.get(sessionId)!
-    if (s.status === 'connected') {
-      res.json({ status: 'already_connected', sessionId })
-      return
-    }
-    res.json({ status: 'pending', sessionId, message: 'QR will arrive via SSE' })
+    res.json({ status: s.status, sessionId })
     return
   }
 
-  if (SessionManager.count() >= config.maxSessions) {
+  if (!canStart()) {
     res.status(429).json({ error: `Max sessions limit (${config.maxSessions}) reached` })
     return
   }
 
   try {
-    await prisma.session.upsert({
-      where: { id: sessionId },
-      update: { status: 'pending', name: name ?? null },
-      create: { id: sessionId, status: 'pending', name: name ?? null }
-    })
-
-    const { state, saveCreds } = await usePostgresAuthState(sessionId)
-    const sock = await createSocket(sessionId, state, saveCreds)
-    SessionManager.set(sessionId, { socket: sock, status: 'pending', name: name ?? undefined })
-
-    logger.info({ sessionId, name }, 'Session starting via dashboard')
-
-    res.json({
-      status: 'starting',
-      sessionId,
-      message: 'QR code will arrive via SSE (/dashboard/events)'
-    })
+    await startSession(sessionId, { name: name ?? undefined })
+    SseEventBus.publish('session.update', { sessionId, status: 'pending', name })
+    res.json({ status: 'starting', sessionId, message: 'QR code will arrive via SSE (/dashboard/events)' })
   } catch (err) {
     logger.error({ sessionId, err }, 'Failed to start session')
     res.status(500).json({ error: 'Failed to start session' })
@@ -124,15 +105,8 @@ router.post('/api/sessions/:id/stop', adminAuth, async (req: Request, res: Respo
     return
   }
 
-  SessionManager.delete(sessionId)
-  await prisma.session.update({
-    where: { id: sessionId },
-    data: { status: 'disconnected' }
-  }).catch(() => { })
-
+  await stopSession(sessionId)
   SseEventBus.publish('session.update', { sessionId, status: 'disconnected' })
-  logger.info({ sessionId }, 'Session stopped via dashboard')
-
   res.json({ success: true, sessionId })
 })
 
@@ -140,31 +114,15 @@ router.post('/api/sessions/:id/stop', adminAuth, async (req: Request, res: Respo
 router.post('/api/sessions/:id/restart', adminAuth, async (req: Request, res: Response) => {
   const sessionId = String(req.params.id)
 
-  const existing = SessionManager.get(sessionId)
-  if (!existing) {
+  if (!SessionManager.has(sessionId)) {
     res.status(404).json({ error: 'Session not found' })
     return
   }
 
-  const { name, webhookUrl, webhookSecret } = existing
-
   try {
-    // Close current socket without deleting from DB
-    SessionManager.delete(sessionId)
-
-    await prisma.session.update({
-      where: { id: sessionId },
-      data: { status: 'pending' }
-    }).catch(() => { })
-
-    // Reconnect using saved auth state — no QR needed if creds still valid
-    const { state, saveCreds } = await usePostgresAuthState(sessionId)
-    const sock = await createSocket(sessionId, state, saveCreds)
-    SessionManager.set(sessionId, { socket: sock, status: 'pending', name, webhookUrl, webhookSecret })
-
-    SseEventBus.publish('session.update', { sessionId, status: 'pending', name })
-    logger.info({ sessionId }, 'Session restarted via dashboard')
-
+    await restartSession(sessionId)
+    const s = SessionManager.get(sessionId)
+    SseEventBus.publish('session.update', { sessionId, status: 'pending', name: s?.name })
     res.json({ success: true, sessionId, status: 'pending' })
   } catch (err) {
     logger.error({ sessionId, err }, 'Failed to restart session')
