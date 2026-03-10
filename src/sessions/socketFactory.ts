@@ -66,34 +66,58 @@ export async function createSocket(sessionId: string, authState: any, saveCreds:
 
     if (connection === 'close') {
       const statusCode = (lastDisconnect?.error as any)?.output?.statusCode
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut
+      const shouldReconnect = !isLoggedOut && SessionManager.has(sessionId)
 
-      const reason = statusCode === DisconnectReason.loggedOut ? 'loggedOut'
+      const reason = isLoggedOut ? 'loggedOut'
         : statusCode === DisconnectReason.timedOut ? 'timedOut'
         : 'connectionClosed'
 
-      logger.info({ sessionId, statusCode, shouldReconnect }, 'Connection closed')
+      logger.info({ sessionId, statusCode, shouldReconnect, reason }, 'Connection closed')
 
-      SessionManager.update(sessionId, { status: 'disconnected' })
+      // Only emit disconnect if session still tracked (avoid spam from already-deleted sessions)
+      if (SessionManager.has(sessionId)) {
+        SessionManager.update(sessionId, { status: 'disconnected', qr: undefined, qrRaw: undefined })
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: { status: 'disconnected' }
+        }).catch(() => { })
 
-      await prisma.session.update({
-        where: { id: sessionId },
-        data: { status: 'disconnected' }
-      }).catch(() => { /* session might already be deleted */ })
+        SseEventBus.publish('session.update', { sessionId, status: 'disconnected' })
+        await dispatchWebhook('session.disconnected', { sessionId, reason })
+      }
 
-      SseEventBus.publish('session.update', { sessionId, status: 'disconnected' })
-      await dispatchWebhook('session.disconnected', { sessionId, reason })
+      if (isLoggedOut) {
+        // Auth revoked — clear session but keep DB record as STOPPED
+        SessionManager.delete(sessionId)
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: { status: 'disconnected' }
+        }).catch(() => { })
+        return
+      }
 
       if (shouldReconnect) {
-        logger.info({ sessionId }, 'Reconnecting...')
-        // Re-import authAdapter to get fresh state
-        const { usePostgresAuthState } = await import('./authAdapter')
-        const { state, saveCreds: newSaveCreds } = await usePostgresAuthState(sessionId)
-        const newSock = await createSocket(sessionId, state, newSaveCreds)
-        SessionManager.update(sessionId, { socket: newSock, status: 'pending' })
-      } else {
-        SessionManager.delete(sessionId)
-        await prisma.session.delete({ where: { id: sessionId } }).catch(() => { })
+        // Exponential backoff: wait before reconnecting to avoid spam
+        const delay = Math.min(5000, 1000 + Math.random() * 2000)
+        logger.info({ sessionId, delay }, 'Reconnecting after delay...')
+
+        setTimeout(async () => {
+          // Double-check session still exists and hasn't been manually stopped
+          if (!SessionManager.has(sessionId)) {
+            logger.info({ sessionId }, 'Session was removed during reconnect delay, aborting')
+            return
+          }
+          try {
+            const { usePostgresAuthState } = await import('./authAdapter')
+            const { state, saveCreds: newSaveCreds } = await usePostgresAuthState(sessionId)
+            const newSock = await createSocket(sessionId, state, newSaveCreds)
+            SessionManager.update(sessionId, { socket: newSock, status: 'pending' })
+          } catch (err) {
+            logger.error({ sessionId, err }, 'Failed to reconnect')
+            SessionManager.update(sessionId, { status: 'disconnected' })
+          }
+        }, delay)
       }
     }
   })

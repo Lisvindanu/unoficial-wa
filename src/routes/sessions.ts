@@ -12,7 +12,17 @@ const router = Router()
 function sessionResponse(sessionId: string) {
   const s = SessionManager.get(sessionId)!
   const status = mapStatus(s)
-  return { name: s.name ?? sessionId, status, me: buildMe(s), engine: { engine: 'NOWEB', state: status } }
+  return {
+    name: s.name ?? sessionId,
+    status,
+    me: buildMe(s),
+    engine: { engine: 'NOWEB', state: status },
+    config: {
+      webhooks: s.webhookUrl
+        ? [{ url: s.webhookUrl, events: ['message', 'session.status'], hmac: s.webhookSecret ?? null }]
+        : []
+    }
+  }
 }
 
 /**
@@ -551,104 +561,6 @@ router.post('/:name/auth/request-code', apiKeyAuth, ipWhitelist, async (req: Req
     logger.error({ sessionId, err }, 'Failed to request pairing code')
     res.status(500).json({ error: 'Failed to request pairing code' })
   }
-})
-
-// ── Backward-compat aliases ───────────────────────────────────────
-
-/**
- * @swagger
- * /api/sessions/start:
- *   post:
- *     summary: "[Deprecated] Mulai sesi — gunakan POST /api/sessions atau POST /api/sessions/:name/start"
- *     tags: [Sessions]
- *     security:
- *       - ApiKeyAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               sessionId:
- *                 type: string
- *               name:
- *                 type: string
- *               webhookUrl:
- *                 type: string
- *               webhookSecret:
- *                 type: string
- *     responses:
- *       200:
- *         description: Sesi berhasil dimulai
- */
-router.post('/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
-  const { sessionId, name, webhookUrl, webhookSecret } = req.body
-  const id: string = sessionId ?? name
-
-  if (!id || typeof id !== 'string') {
-    res.status(400).json({ error: 'sessionId (or name) is required' })
-    return
-  }
-
-  if (SessionManager.has(id)) {
-    res.json(sessionResponse(id))
-    return
-  }
-
-  if (!canStart()) {
-    res.status(429).json({ error: `Max sessions limit (${config.maxSessions}) reached` })
-    return
-  }
-
-  try {
-    await startSession(id, { name: name ?? id, webhookUrl, webhookSecret })
-    res.json(sessionResponse(id))
-  } catch (err) {
-    logger.error({ sessionId: id, err }, 'Failed to start session')
-    res.status(500).json({ error: 'Failed to start session' })
-  }
-})
-
-/**
- * @swagger
- * /api/sessions/stop:
- *   post:
- *     summary: "[Deprecated] Hentikan sesi — gunakan POST /api/sessions/:name/stop"
- *     tags: [Sessions]
- *     security:
- *       - ApiKeyAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [sessionId]
- *             properties:
- *               sessionId:
- *                 type: string
- *     responses:
- *       200:
- *         description: Sesi dihentikan
- *       404:
- *         description: Sesi tidak ditemukan
- */
-router.post('/stop', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
-  const { sessionId } = req.body
-
-  if (!sessionId) {
-    res.status(400).json({ error: 'sessionId is required' })
-    return
-  }
-
-  if (!SessionManager.has(sessionId)) {
-    res.status(404).json({ error: 'Session not found' })
-    return
-  }
-
-  await stopSession(sessionId)
-  res.json({ success: true, sessionId })
 })
 
 export default router
