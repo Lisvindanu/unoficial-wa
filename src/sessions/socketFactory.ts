@@ -83,30 +83,40 @@ export async function createSocket(sessionId: string, authState: any, saveCreds:
 
       logger.info({ sessionId, statusCode, shouldReconnect, reason }, 'Connection closed')
 
-      // Only emit disconnect if session still tracked (avoid spam from already-deleted sessions)
-      if (SessionManager.has(sessionId)) {
-        SessionManager.update(sessionId, { status: 'disconnected', qr: undefined, qrRaw: undefined })
-        await prisma.session.update({
-          where: { id: sessionId },
-          data: { status: 'disconnected' }
-        }).catch(() => { })
-
-        SseEventBus.publish('session.update', { sessionId, status: 'disconnected' })
-        await dispatchWebhook(sessionId, 'session.status', {
-          name: sessionId,
-          status: 'STOPPED',
-          statuses: [{ status: 'STOPPED', timestamp: Date.now() }]
-        })
-      }
-
       if (isLoggedOut) {
-        // Auth revoked — clear session but keep DB record as STOPPED
+        // Auth revoked by WhatsApp — clear creds and mark stopped
         SessionManager.delete(sessionId)
         await prisma.session.update({
           where: { id: sessionId },
           data: { status: 'disconnected' }
         }).catch(() => { })
+        SseEventBus.publish('session.update', { sessionId, status: 'disconnected' })
+        await dispatchWebhook(sessionId, 'session.status', {
+          name: sessionId, status: 'STOPPED',
+          statuses: [{ status: 'STOPPED', timestamp: Date.now() }]
+        })
         return
+      }
+
+      if (shouldReconnect) {
+        // Temporary disconnect — keep status in memory as disconnected for UI,
+        // but do NOT persist to DB so session can be restored after server restart
+        if (SessionManager.has(sessionId)) {
+          SessionManager.update(sessionId, { status: 'disconnected', qr: undefined, qrRaw: undefined })
+          SseEventBus.publish('session.update', { sessionId, status: 'disconnected' })
+        }
+      } else if (SessionManager.has(sessionId)) {
+        // Manually stopped — update DB too
+        SessionManager.update(sessionId, { status: 'disconnected', qr: undefined, qrRaw: undefined })
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: { status: 'disconnected' }
+        }).catch(() => { })
+        SseEventBus.publish('session.update', { sessionId, status: 'disconnected' })
+        await dispatchWebhook(sessionId, 'session.status', {
+          name: sessionId, status: 'STOPPED',
+          statuses: [{ status: 'STOPPED', timestamp: Date.now() }]
+        })
       }
 
       if (shouldReconnect) {

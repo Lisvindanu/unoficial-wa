@@ -61,12 +61,17 @@ async function start() {
     await prisma.$connect()
     logger.info('Database connected')
 
-    // Restore sessions that were connected before restart
-    const activeSessions = await prisma.session.findMany({
-      where: { status: 'connected' }
+    // Restore all sessions that have saved credentials (regardless of last status)
+    // This ensures sessions survive server restarts, not just clean shutdowns
+    const sessionsToRestore = await prisma.session.findMany({
+      where: {
+        authKeys: { some: { keyType: 'creds', keyId: 'main' } }
+      }
     })
 
-    for (const session of activeSessions) {
+    logger.info(`Restoring ${sessionsToRestore.length} session(s) with saved credentials...`)
+
+    for (const session of sessionsToRestore) {
       try {
         logger.info({ sessionId: session.id }, 'Restoring session...')
         const { state, saveCreds } = await usePostgresAuthState(session.id)
@@ -97,8 +102,16 @@ async function start() {
 }
 
 process.on('SIGTERM', async () => {
-  logger.info('Shutting down...')
-  await prisma.$disconnect()
+  logger.info('SIGTERM received, shutting down...')
+  // Exit immediately — do NOT await socket close events so Baileys
+  // close handlers don't get a chance to update DB status to disconnected.
+  // Sessions will be restored from DB credentials on next start.
+  await prisma.$disconnect().catch(() => { })
+  process.exit(0)
+})
+
+process.on('SIGINT', async () => {
+  await prisma.$disconnect().catch(() => { })
   process.exit(0)
 })
 
