@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { apiKeyAuth } from '../middleware/apiKeyAuth'
 import { ipWhitelist } from '../middleware/ipWhitelist'
-import { SessionManager } from '../sessions/sessionManager'
+import { SessionManager, mapStatus, buildMe } from '../sessions/sessionManager'
 import { usePostgresAuthState } from '../sessions/authAdapter'
 import { createSocket } from '../sessions/socketFactory'
 import { prisma } from '../lib/prisma'
@@ -38,20 +38,24 @@ const router = Router()
  *         description: Melebihi batas maksimum sesi
  */
 router.post('/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
-  const { sessionId, webhookUrl, webhookSecret } = req.body
+  const { sessionId: rawSessionId, name: rawName, webhookUrl, webhookSecret } = req.body
+  // Accept either sessionId or name (WAHA compat)
+  const sessionId: string = rawSessionId ?? rawName
+  const sessionName: string | undefined = rawName ?? rawSessionId
 
   if (!sessionId || typeof sessionId !== 'string') {
-    res.status(400).json({ error: 'sessionId is required' })
+    res.status(400).json({ error: 'sessionId (or name) is required' })
     return
   }
 
   if (SessionManager.has(sessionId)) {
     const session = SessionManager.get(sessionId)!
-    if (session.status === 'connected') {
-      res.json({ status: 'already_connected', sessionId })
-      return
-    }
-    res.json({ status: 'pending', sessionId, message: 'QR will arrive via SSE or webhook' })
+    res.json({
+      name: session.name ?? sessionId,
+      status: mapStatus(session),
+      me: buildMe(session),
+      engine: { engine: 'NOWEB', state: mapStatus(session) }
+    })
     return
   }
 
@@ -63,8 +67,8 @@ router.post('/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Respons
   try {
     await prisma.session.upsert({
       where: { id: sessionId },
-      update: { status: 'pending', webhookUrl: webhookUrl ?? null, webhookSecret: webhookSecret ?? null },
-      create: { id: sessionId, status: 'pending', webhookUrl: webhookUrl ?? null, webhookSecret: webhookSecret ?? null }
+      update: { name: sessionName ?? null, status: 'pending', webhookUrl: webhookUrl ?? null, webhookSecret: webhookSecret ?? null },
+      create: { id: sessionId, name: sessionName ?? null, status: 'pending', webhookUrl: webhookUrl ?? null, webhookSecret: webhookSecret ?? null }
     })
 
     const { state, saveCreds } = await usePostgresAuthState(sessionId)
@@ -73,6 +77,7 @@ router.post('/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Respons
     SessionManager.set(sessionId, {
       socket: sock,
       status: 'pending',
+      name: sessionName,
       webhookUrl: webhookUrl ?? undefined,
       webhookSecret: webhookSecret ?? undefined
     })
@@ -80,9 +85,10 @@ router.post('/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Respons
     logger.info({ sessionId, webhookUrl }, 'Session starting')
 
     res.json({
-      status: 'starting',
-      sessionId,
-      message: 'QR code will arrive via SSE (/dashboard/events) or webhook'
+      name: sessionName ?? sessionId,
+      status: 'STARTING',
+      me: null,
+      engine: { engine: 'NOWEB', state: 'STARTING' }
     })
   } catch (err) {
     logger.error({ sessionId, err }, 'Failed to start session')
@@ -166,10 +172,12 @@ router.get('/:sessionId/status', apiKeyAuth, ipWhitelist, (req: Request, res: Re
     return
   }
 
+  const status = mapStatus(session)
   res.json({
-    sessionId,
-    status: session.status,
-    phoneNumber: session.phoneNumber ?? null
+    name: session.name ?? sessionId,
+    status,
+    me: buildMe(session),
+    engine: { engine: 'NOWEB', state: status }
   })
 })
 
@@ -221,21 +229,12 @@ router.get('/:sessionId/me', apiKeyAuth, ipWhitelist, (req: Request, res: Respon
   }
 
   if (session.status !== 'connected') {
-    res.status(409).json({ error: `Session is ${session.status}, not connected` })
+    res.status(409).json({ error: `Session is ${mapStatus(session)}, not connected` })
     return
   }
 
-  const user = session.socket.user
-  const id = user?.id ?? null          // "628xxx:0@s.whatsapp.net"
-  const phoneNumber = id?.split(':')[0] ?? session.phoneNumber ?? null
-  const name = user?.name ?? null      // push name
-
-  res.json({
-    sessionId,
-    id,
-    phoneNumber,
-    name
-  })
+  const me = buildMe(session)
+  res.json(me)
 })
 
 /**

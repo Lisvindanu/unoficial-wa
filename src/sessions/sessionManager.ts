@@ -9,6 +9,26 @@ export interface SessionEntry {
   webhookSecret?: string
 }
 
+export function mapStatus(session: SessionEntry): string {
+  switch (session.status) {
+    case 'connected': return 'WORKING'
+    case 'pending': return session.qr ? 'SCAN_QR_CODE' : 'STARTING'
+    case 'disconnected': return 'STOPPED'
+    default: return 'STOPPED'
+  }
+}
+
+export function buildMe(session: SessionEntry): { id: string | null; pushName: string | null } | null {
+  if (session.status !== 'connected') return null
+  const user = session.socket?.user
+  const rawId: string | undefined = user?.id
+  const phone = rawId?.split(':')[0] ?? session.phoneNumber ?? null
+  return {
+    id: phone ? `${phone}@c.us` : null,
+    pushName: user?.name ?? null
+  }
+}
+
 const sessions = new Map<string, SessionEntry>()
 
 export const SessionManager = {
@@ -32,10 +52,10 @@ export const SessionManager = {
   has: (id: string) => sessions.has(id),
 
   getAll: () => Array.from(sessions.entries()).map(([id, s]) => ({
-    id,
-    status: s.status,
-    phoneNumber: s.phoneNumber ?? null,
-    name: s.name ?? null
+    name: s.name ?? id,
+    status: mapStatus(s),
+    me: buildMe(s),
+    engine: { engine: 'NOWEB', state: mapStatus(s) }
   })),
 
   count: () => sessions.size
