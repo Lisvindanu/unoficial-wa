@@ -18,13 +18,15 @@ export function mapStatus(session: SessionEntry): string {
   }
 }
 
-export function buildMe(session: SessionEntry): { id: string | null; pushName: string | null } | null {
+export function buildMe(session: SessionEntry): { id: string | null; lid: null; jid: string | null; pushName: string | null } | null {
   if (session.status !== 'connected') return null
   const user = session.socket?.user
-  const rawId: string | undefined = user?.id
+  const rawId: string | undefined = user?.id  // "628xxx:0@s.whatsapp.net"
   const phone = rawId?.split(':')[0] ?? session.phoneNumber ?? null
   return {
     id: phone ? `${phone}@c.us` : null,
+    lid: null,
+    jid: rawId ?? null,
     pushName: user?.name ?? null
   }
 }

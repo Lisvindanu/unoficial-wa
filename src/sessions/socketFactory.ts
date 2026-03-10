@@ -41,7 +41,11 @@ export async function createSocket(sessionId: string, authState: any, saveCreds:
         SessionManager.update(sessionId, { qr: qrBase64, qrRaw: qr })
 
         SseEventBus.publish('session.qr', { sessionId, qr: qrBase64 })
-        await dispatchWebhook('session.qr', { sessionId, qr: qrBase64 })
+        await dispatchWebhook(sessionId, 'session.status', {
+          name: sessionId,
+          status: 'SCAN_QR_CODE',
+          statuses: [{ status: 'SCAN_QR_CODE', timestamp: Date.now() }]
+        })
 
         logger.info({ sessionId }, 'QR generated')
       } catch (err) {
@@ -59,7 +63,11 @@ export async function createSocket(sessionId: string, authState: any, saveCreds:
       })
 
       SseEventBus.publish('session.update', { sessionId, status: 'connected', phoneNumber })
-      await dispatchWebhook('session.connected', { sessionId, phoneNumber })
+      await dispatchWebhook(sessionId, 'session.status', {
+        name: sessionId,
+        status: 'WORKING',
+        statuses: [{ status: 'WORKING', timestamp: Date.now() }]
+      })
 
       logger.info({ sessionId, phoneNumber }, 'Session connected')
     }
@@ -84,7 +92,11 @@ export async function createSocket(sessionId: string, authState: any, saveCreds:
         }).catch(() => { })
 
         SseEventBus.publish('session.update', { sessionId, status: 'disconnected' })
-        await dispatchWebhook('session.disconnected', { sessionId, reason })
+        await dispatchWebhook(sessionId, 'session.status', {
+          name: sessionId,
+          status: 'STOPPED',
+          statuses: [{ status: 'STOPPED', timestamp: Date.now() }]
+        })
       }
 
       if (isLoggedOut) {
@@ -128,19 +140,34 @@ export async function createSocket(sessionId: string, authState: any, saveCreds:
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue
 
-      const payload = {
-        sessionId,
-        from: msg.key.remoteJid,
-        messageId: msg.key.id,
-        type: Object.keys(msg.message)[0],
-        text: msg.message.conversation
-          || msg.message.extendedTextMessage?.text
-          || '',
-        timestamp: msg.messageTimestamp
+      const fromJid = msg.key.remoteJid ?? ''
+      const fromCUs = fromJid.replace('@s.whatsapp.net', '@c.us').replace('@g.us', '@g.us')
+      const myPhone = sock.user?.id?.split(':')[0] ?? ''
+      const msgId = msg.key.id ?? ''
+      const fromMe = msg.key.fromMe ?? false
+
+      const text = msg.message?.conversation
+        || msg.message?.extendedTextMessage?.text
+        || ''
+
+      const hasMedia = !!(msg.message?.imageMessage || msg.message?.videoMessage
+        || msg.message?.audioMessage || msg.message?.documentMessage)
+
+      const wahaPayload = {
+        id: `${fromMe ? 'true' : 'false'}_${fromCUs}_${msgId}`,
+        timestamp: Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000),
+        from: fromCUs,
+        fromMe,
+        source: 'api',
+        to: myPhone ? `${myPhone}@c.us` : '',
+        body: text,
+        hasMedia,
+        ack: -1,
+        ackName: 'ERROR'
       }
 
-      SseEventBus.publish('webhook.log', { event: 'message.received', data: payload, ts: Date.now() })
-      await dispatchWebhook('message.received', payload)
+      SseEventBus.publish('webhook.log', { event: 'message', data: wahaPayload, ts: Date.now() })
+      await dispatchWebhook(sessionId, 'message', wahaPayload)
     }
   })
 
@@ -148,15 +175,18 @@ export async function createSocket(sessionId: string, authState: any, saveCreds:
     for (const update of updates) {
       if (!update.update?.status) continue
 
-      const statusMap: Record<number, string> = { 1: 'sent', 2: 'delivered', 3: 'read', 4: 'played' }
-      const payload = {
-        sessionId,
-        messageId: update.key.id,
-        status: statusMap[update.update.status] ?? 'unknown'
+      const ackNames: Record<number, string> = { 0: 'PENDING', 1: 'SERVER', 2: 'DELIVERED', 3: 'READ', 4: 'PLAYED' }
+      const ackNum = update.update?.status ?? 0
+      const wahaAck = {
+        id: update.key.id,
+        from: update.key.remoteJid?.replace('@s.whatsapp.net', '@c.us') ?? '',
+        fromMe: update.key.fromMe ?? false,
+        ack: ackNum,
+        ackName: ackNames[ackNum] ?? 'ERROR'
       }
 
-      SseEventBus.publish('webhook.log', { event: 'message.updated', data: payload, ts: Date.now() })
-      await dispatchWebhook('message.updated', payload)
+      SseEventBus.publish('webhook.log', { event: 'message.ack', data: wahaAck, ts: Date.now() })
+      await dispatchWebhook(sessionId, 'message.ack', wahaAck)
     }
   })
 

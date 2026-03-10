@@ -77,8 +77,24 @@ function sessionResponse(sessionId: string) {
  *               items:
  *                 $ref: '#/components/schemas/SessionStatus'
  */
-router.get('/', apiKeyAuth, ipWhitelist, (_req: Request, res: Response) => {
-  res.json(SessionManager.getAll())
+router.get('/', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const all = req.query.all === 'true' || req.query.all === '1'
+  const active = SessionManager.getAll()
+  if (!all) { res.json(active); return }
+
+  // Also get STOPPED sessions from DB
+  const dbSessions = await prisma.session.findMany({ where: { status: 'disconnected' } })
+  const activeIds = new Set(active.map((s: any) => s.name))
+  const stopped = dbSessions
+    .filter(s => !activeIds.has(s.id) && !activeIds.has(s.name ?? s.id))
+    .map(s => ({
+      name: s.name ?? s.id,
+      status: 'STOPPED',
+      me: null,
+      engine: { engine: 'NOWEB', state: 'STOPPED' },
+      config: { webhooks: s.webhookUrl ? [{ url: s.webhookUrl, events: ['message', 'session.status'], hmac: s.webhookSecret ?? null }] : [] }
+    }))
+  res.json([...active, ...stopped])
 })
 
 /**
@@ -233,7 +249,7 @@ router.post('/:name/start', apiKeyAuth, ipWhitelist, async (req: Request, res: R
       webhookUrl: existing?.webhookUrl ?? undefined,
       webhookSecret: existing?.webhookSecret ?? undefined
     })
-    res.json(sessionResponse(sessionId))
+    res.status(201).json(sessionResponse(sessionId))
   } catch (err) {
     logger.error({ sessionId, err }, 'Failed to start session')
     res.status(500).json({ error: 'Failed to start session' })
@@ -269,7 +285,7 @@ router.post('/:name/stop', apiKeyAuth, ipWhitelist, async (req: Request, res: Re
   }
 
   await stopSession(sessionId)
-  res.json({ name: sessionId, status: 'STOPPED' })
+  res.status(201).json({ name: sessionId, status: 'STOPPED' })
 })
 
 /**
@@ -302,7 +318,7 @@ router.post('/:name/restart', apiKeyAuth, ipWhitelist, async (req: Request, res:
 
   try {
     await restartSession(sessionId)
-    res.json(sessionResponse(sessionId))
+    res.status(201).json(sessionResponse(sessionId))
   } catch (err) {
     logger.error({ sessionId, err }, 'Failed to restart session')
     res.status(500).json({ error: 'Failed to restart session' })
@@ -339,10 +355,33 @@ router.post('/:name/logout', apiKeyAuth, ipWhitelist, async (req: Request, res: 
 
   try {
     await logoutSession(sessionId)
-    res.json({ success: true })
+    res.status(201).json({ success: true })
   } catch (err) {
     logger.error({ sessionId, err }, 'Failed to logout session')
     res.status(500).json({ error: 'Failed to logout session' })
+  }
+})
+
+router.put('/:name', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
+  const sessionId = String(req.params.name)
+  const { config: sessionConfig } = req.body as { config?: { webhooks?: Array<{url: string; hmac?: string}> } }
+
+  const webhookUrl = sessionConfig?.webhooks?.[0]?.url ?? null
+  const webhookSecret = sessionConfig?.webhooks?.[0]?.hmac ?? null
+
+  SessionManager.update(sessionId, {
+    webhookUrl: webhookUrl ?? undefined,
+    webhookSecret: webhookSecret ?? undefined
+  })
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: { webhookUrl, webhookSecret }
+  }).catch(() => {})
+
+  if (SessionManager.has(sessionId)) {
+    res.json(sessionResponse(sessionId))
+  } else {
+    res.json({ name: sessionId, status: 'STOPPED', config: { webhooks: webhookUrl ? [{ url: webhookUrl, events: ['message', 'session.status'], hmac: webhookSecret }] : [] } })
   }
 })
 
