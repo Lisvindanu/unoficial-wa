@@ -16,6 +16,36 @@ import { logger } from '../lib/logger'
 
 const router = Router()
 
+/**
+ * @swagger
+ * /api/{name}/auth/qr:
+ *   get:
+ *     summary: QR code untuk sesi (flat path, WAHA compat)
+ *     tags: [Auth]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: format
+ *         schema:
+ *           type: string
+ *           enum: [image, raw]
+ *           default: image
+ *     responses:
+ *       200:
+ *         description: QR code
+ *       202:
+ *         description: QR belum tersedia
+ *       404:
+ *         description: Sesi tidak ditemukan
+ *       409:
+ *         description: Sudah connected
+ */
 // ── QR code ───────────────────────────────────────────────────────
 router.get('/:name/auth/qr', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
@@ -48,6 +78,43 @@ router.get('/:name/auth/qr', apiKeyAuth, ipWhitelist, (req: Request, res: Respon
   res.send(imgBuffer)
 })
 
+/**
+ * @swagger
+ * /api/{name}/auth/request-code:
+ *   post:
+ *     summary: Minta kode pairing via nomor HP (flat path, WAHA compat)
+ *     tags: [Auth]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [phoneNumber]
+ *             properties:
+ *               phoneNumber:
+ *                 type: string
+ *                 example: "628123456789"
+ *     responses:
+ *       200:
+ *         description: Kode pairing
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 code:
+ *                   type: string
+ *                   example: "ABCD-EFGH"
+ */
 // ── Pairing code ──────────────────────────────────────────────────
 router.post('/:name/auth/request-code', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
@@ -80,6 +147,45 @@ router.post('/:name/auth/request-code', apiKeyAuth, ipWhitelist, async (req: Req
   }
 })
 
+/**
+ * @swagger
+ * /api/sendText:
+ *   post:
+ *     summary: Kirim pesan teks (WAHA format)
+ *     tags: [Messages]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [session, chatId, text]
+ *             properties:
+ *               session:
+ *                 type: string
+ *                 example: "lembaga-a"
+ *               chatId:
+ *                 type: string
+ *                 example: "628123456789@c.us"
+ *               text:
+ *                 type: string
+ *                 example: "Hello World"
+ *     responses:
+ *       200:
+ *         description: Pesan terkirim
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                 status:
+ *                   type: string
+ *                   example: "sent"
+ */
 // ── Send text ─────────────────────────────────────────────────────
 router.post('/sendText', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const { session: sessionId, chatId, text } = req.body as {
@@ -115,6 +221,42 @@ router.post('/sendText', apiKeyAuth, ipWhitelist, async (req: Request, res: Resp
   }
 })
 
+/**
+ * @swagger
+ * /api/sendImage:
+ *   post:
+ *     summary: Kirim gambar (WAHA format)
+ *     tags: [Messages]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [session, chatId, file]
+ *             properties:
+ *               session:
+ *                 type: string
+ *               chatId:
+ *                 type: string
+ *                 example: "628123456789@c.us"
+ *               file:
+ *                 type: object
+ *                 properties:
+ *                   url:
+ *                     type: string
+ *                   mimetype:
+ *                     type: string
+ *                   filename:
+ *                     type: string
+ *               caption:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Gambar terkirim
+ */
 // ── Send image ────────────────────────────────────────────────────
 router.post('/sendImage', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const { session: sessionId, chatId, file, caption } = req.body as {
@@ -154,6 +296,42 @@ router.post('/sendImage', apiKeyAuth, ipWhitelist, async (req: Request, res: Res
   }
 })
 
+/**
+ * @swagger
+ * /api/sendFile:
+ *   post:
+ *     summary: Kirim file/dokumen (WAHA format)
+ *     tags: [Messages]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [session, chatId, file]
+ *             properties:
+ *               session:
+ *                 type: string
+ *               chatId:
+ *                 type: string
+ *                 example: "628123456789@c.us"
+ *               file:
+ *                 type: object
+ *                 properties:
+ *                   url:
+ *                     type: string
+ *                   mimetype:
+ *                     type: string
+ *                   filename:
+ *                     type: string
+ *               caption:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: File terkirim
+ */
 // ── Send file / document ──────────────────────────────────────────
 router.post('/sendFile', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const { session: sessionId, chatId, file, caption } = req.body as {

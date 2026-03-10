@@ -15,12 +15,87 @@ function sessionResponse(sessionId: string) {
   return { name: s.name ?? sessionId, status, me: buildMe(s), engine: { engine: 'NOWEB', state: status } }
 }
 
-// ── GET /api/sessions ─────────────────────────────────────────────
+/**
+ * @swagger
+ * components:
+ *   schemas:
+ *     SessionStatus:
+ *       type: object
+ *       properties:
+ *         name:
+ *           type: string
+ *           example: "lembaga-a"
+ *         status:
+ *           type: string
+ *           enum: [STARTING, SCAN_QR_CODE, WORKING, STOPPED, FAILED]
+ *         me:
+ *           type: object
+ *           nullable: true
+ *           properties:
+ *             id:
+ *               type: string
+ *               example: "628123456789@c.us"
+ *             pushName:
+ *               type: string
+ *               example: "Nama Profil"
+ *         engine:
+ *           type: object
+ *           properties:
+ *             engine:
+ *               type: string
+ *               example: "NOWEB"
+ *             state:
+ *               type: string
+ *               example: "WORKING"
+ */
+
+/**
+ * @swagger
+ * /api/sessions:
+ *   get:
+ *     summary: List semua sesi aktif
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Array sesi
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/SessionStatus'
+ */
 router.get('/', apiKeyAuth, ipWhitelist, (_req: Request, res: Response) => {
   res.json(SessionManager.getAll())
 })
 
-// ── GET /api/sessions/:name ───────────────────────────────────────
+/**
+ * @swagger
+ * /api/sessions/{name}:
+ *   get:
+ *     summary: Status sesi tertentu
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         example: "lembaga-a"
+ *     responses:
+ *       200:
+ *         description: Status sesi
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SessionStatus'
+ *       404:
+ *         description: Sesi tidak ditemukan
+ */
 router.get('/:name', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
   if (!SessionManager.has(sessionId)) {
@@ -30,9 +105,46 @@ router.get('/:name', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
   res.json(sessionResponse(sessionId))
 })
 
-// ── POST /api/sessions — create + start (WAHA format) ────────────
+/**
+ * @swagger
+ * /api/sessions:
+ *   post:
+ *     summary: Buat dan mulai sesi baru (WAHA format)
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 example: "lembaga-a"
+ *               config:
+ *                 type: object
+ *                 properties:
+ *                   webhookUrl:
+ *                     type: string
+ *                   webhookSecret:
+ *                     type: string
+ *     responses:
+ *       201:
+ *         description: Sesi berhasil dibuat
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SessionStatus'
+ *       409:
+ *         description: Sesi sudah ada
+ *       429:
+ *         description: Melebihi batas maksimum sesi
+ */
 router.post('/', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
-  const { name, start, config: sessionConfig } = req.body as {
+  const { name, config: sessionConfig } = req.body as {
     name?: string
     start?: boolean
     config?: { webhookUrl?: string; webhookSecret?: string }
@@ -67,7 +179,30 @@ router.post('/', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) =>
   }
 })
 
-// ── POST /api/sessions/:name/start ───────────────────────────────
+/**
+ * @swagger
+ * /api/sessions/{name}/start:
+ *   post:
+ *     summary: Start sesi (gunakan name yang sudah ada di DB)
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Sesi berhasil dimulai
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SessionStatus'
+ *       429:
+ *         description: Melebihi batas maksimum sesi
+ */
 router.post('/:name/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
 
@@ -95,7 +230,26 @@ router.post('/:name/start', apiKeyAuth, ipWhitelist, async (req: Request, res: R
   }
 })
 
-// ── POST /api/sessions/:name/stop ────────────────────────────────
+/**
+ * @swagger
+ * /api/sessions/{name}/stop:
+ *   post:
+ *     summary: Hentikan sesi
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Sesi dihentikan
+ *       404:
+ *         description: Sesi tidak ditemukan
+ */
 router.post('/:name/stop', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
 
@@ -108,7 +262,26 @@ router.post('/:name/stop', apiKeyAuth, ipWhitelist, async (req: Request, res: Re
   res.json({ name: sessionId, status: 'STOPPED' })
 })
 
-// ── POST /api/sessions/:name/restart ─────────────────────────────
+/**
+ * @swagger
+ * /api/sessions/{name}/restart:
+ *   post:
+ *     summary: Restart sesi tanpa scan ulang QR
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Sesi berhasil di-restart
+ *       404:
+ *         description: Sesi tidak ditemukan
+ */
 router.post('/:name/restart', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
 
@@ -126,7 +299,26 @@ router.post('/:name/restart', apiKeyAuth, ipWhitelist, async (req: Request, res:
   }
 })
 
-// ── POST /api/sessions/:name/logout ──────────────────────────────
+/**
+ * @swagger
+ * /api/sessions/{name}/logout:
+ *   post:
+ *     summary: Logout sesi (hapus auth keys, perlu scan QR lagi)
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Berhasil logout
+ *       404:
+ *         description: Sesi tidak ditemukan
+ */
 router.post('/:name/logout', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
 
@@ -144,7 +336,26 @@ router.post('/:name/logout', apiKeyAuth, ipWhitelist, async (req: Request, res: 
   }
 })
 
-// ── DELETE /api/sessions/:name ────────────────────────────────────
+/**
+ * @swagger
+ * /api/sessions/{name}:
+ *   delete:
+ *     summary: Hapus sesi permanen dari DB
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Sesi dihapus
+ *       404:
+ *         description: Sesi tidak ditemukan
+ */
 router.delete('/:name', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
 
@@ -158,7 +369,38 @@ router.delete('/:name', apiKeyAuth, ipWhitelist, async (req: Request, res: Respo
   res.json({ success: true })
 })
 
-// ── GET /api/sessions/:name/me ────────────────────────────────────
+/**
+ * @swagger
+ * /api/sessions/{name}/me:
+ *   get:
+ *     summary: Info akun WhatsApp yang login
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Info akun
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                   example: "628123456789@c.us"
+ *                 pushName:
+ *                   type: string
+ *       404:
+ *         description: Sesi tidak ditemukan
+ *       409:
+ *         description: Sesi belum connected
+ */
 router.get('/:name/me', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
   const session = SessionManager.get(sessionId)
@@ -176,7 +418,36 @@ router.get('/:name/me', apiKeyAuth, ipWhitelist, (req: Request, res: Response) =
   res.json(buildMe(session))
 })
 
-// ── GET /api/sessions/:name/auth/qr ──────────────────────────────
+/**
+ * @swagger
+ * /api/sessions/{name}/auth/qr:
+ *   get:
+ *     summary: Dapatkan QR code untuk pairing
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: format
+ *         schema:
+ *           type: string
+ *           enum: [image, raw]
+ *           default: image
+ *     responses:
+ *       200:
+ *         description: QR code (image/png atau raw string)
+ *       202:
+ *         description: QR belum tersedia, coba lagi
+ *       404:
+ *         description: Sesi tidak ditemukan
+ *       409:
+ *         description: Sesi sudah connected
+ */
 router.get('/:name/auth/qr', apiKeyAuth, ipWhitelist, (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
   const format = (req.query.format as string) || 'image'
@@ -208,7 +479,49 @@ router.get('/:name/auth/qr', apiKeyAuth, ipWhitelist, (req: Request, res: Respon
   res.send(imgBuffer)
 })
 
-// ── POST /api/sessions/:name/auth/request-code ───────────────────
+/**
+ * @swagger
+ * /api/sessions/{name}/auth/request-code:
+ *   post:
+ *     summary: Minta kode pairing via nomor HP (tanpa scan QR)
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [phoneNumber]
+ *             properties:
+ *               phoneNumber:
+ *                 type: string
+ *                 example: "628123456789"
+ *     responses:
+ *       200:
+ *         description: Kode pairing
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 code:
+ *                   type: string
+ *                   example: "ABCD-EFGH"
+ *                 phoneNumber:
+ *                   type: string
+ *       404:
+ *         description: Sesi tidak ditemukan
+ *       409:
+ *         description: Sesi sudah connected
+ */
 router.post('/:name/auth/request-code', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const sessionId = String(req.params.name)
   const { phoneNumber } = req.body as { phoneNumber?: string }
@@ -242,7 +555,33 @@ router.post('/:name/auth/request-code', apiKeyAuth, ipWhitelist, async (req: Req
 
 // ── Backward-compat aliases ───────────────────────────────────────
 
-// POST /api/sessions/start (old format, body: {sessionId})
+/**
+ * @swagger
+ * /api/sessions/start:
+ *   post:
+ *     summary: "[Deprecated] Mulai sesi — gunakan POST /api/sessions atau POST /api/sessions/:name/start"
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               sessionId:
+ *                 type: string
+ *               name:
+ *                 type: string
+ *               webhookUrl:
+ *                 type: string
+ *               webhookSecret:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Sesi berhasil dimulai
+ */
 router.post('/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const { sessionId, name, webhookUrl, webhookSecret } = req.body
   const id: string = sessionId ?? name
@@ -271,7 +610,30 @@ router.post('/start', apiKeyAuth, ipWhitelist, async (req: Request, res: Respons
   }
 })
 
-// POST /api/sessions/stop (old format, body: {sessionId})
+/**
+ * @swagger
+ * /api/sessions/stop:
+ *   post:
+ *     summary: "[Deprecated] Hentikan sesi — gunakan POST /api/sessions/:name/stop"
+ *     tags: [Sessions]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sessionId]
+ *             properties:
+ *               sessionId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Sesi dihentikan
+ *       404:
+ *         description: Sesi tidak ditemukan
+ */
 router.post('/stop', apiKeyAuth, ipWhitelist, async (req: Request, res: Response) => {
   const { sessionId } = req.body
 
